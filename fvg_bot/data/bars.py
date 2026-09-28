@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import List, Sequence
+from datetime import datetime, timedelta
+from typing import Callable, List, Sequence
 
 from fvg_bot.clock import to_et
 from fvg_bot.strategy.types import Bar
@@ -31,3 +32,33 @@ def aggregate(bars: Sequence[Bar], minutes: int) -> List[Bar]:
                 raise ValueError(f"bars out of order at {b.ts}")
             out.append(Bar(ts=start, open=b.open, high=b.high, low=b.low, close=b.close))
     return out
+
+
+M1 = timedelta(minutes=1)
+
+
+class Buckets:
+    """Rolls 1m bars into N-minute bars, emitting each as soon as it is known to be complete."""
+
+    def __init__(self, minutes: int, emit: Callable[[Bar], None]):
+        self.minutes = minutes
+        self.span = timedelta(minutes=minutes)
+        self.emit = emit
+        self.bars: List[Bar] = []
+
+    def _start(self, ts: datetime) -> datetime:
+        return ts.replace(minute=ts.minute - ts.minute % self.minutes, second=0, microsecond=0)
+
+    def add(self, bar: Bar) -> None:
+        if self.bars and self._start(bar.ts) != self._start(self.bars[0].ts):
+            self.flush()
+        self.bars.append(bar)
+
+    def close_if_complete(self, bar: Bar) -> None:
+        if bar.ts + M1 == self._start(bar.ts) + self.span:
+            self.flush()
+
+    def flush(self) -> None:
+        if self.bars:
+            self.emit(aggregate(self.bars, self.minutes)[0])
+            self.bars = []

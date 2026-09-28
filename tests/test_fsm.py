@@ -43,7 +43,7 @@ class Run:
         self.check = check or StubCheck()
         self.fsm = EntryFSM(cfg or Config(), self.check, D)
         self.bars_15m = self._maybe_flip(make_bars(ZONE_ROWS, start=at(9, 30), step=M15))
-        self.bars_1m = self._maybe_flip(make_bars(SETUP_SCENARIO, start=at(10, 15)))
+        self.bars_ltf = self._maybe_flip(make_bars(SETUP_SCENARIO, start=at(10, 15)))
 
     def _maybe_flip(self, bars):
         return mirror(bars) if self.flip else bars
@@ -61,14 +61,14 @@ class Run:
 
     def to_hunt(self):
         self.to_wait()
-        self.fsm.on_1m_bar(self.bars_1m[0])
-        self.fsm.on_1m_bar(self.bars_1m[1])
+        self.fsm.on_ltf_bar(self.bars_ltf[0])
+        self.fsm.on_ltf_bar(self.bars_ltf[1])
         self.tick(at(10, 17, 30), 100.5)
         return self
 
     def through_bar(self, last):
-        for b in self.bars_1m[2 : last + 1]:
-            self.fsm.on_1m_bar(b)
+        for b in self.bars_ltf[2 : last + 1]:
+            self.fsm.on_ltf_bar(b)
         return self
 
     def to_armed(self):
@@ -214,9 +214,9 @@ def test_entry_result_out_of_state_raises():
 def test_setup_window_expiry_does_not_refire_on_spent_swing():
     r = Run(cfg=Config(setup_window_bars=1)).to_hunt().through_bar(6)
     assert r.fsm.state is State.HUNT_CHOCH
-    assert reasons(r.fsm)[-1] == "no qualifying 1m FVG within setup window"
+    assert reasons(r.fsm)[-1] == "no qualifying LTF FVG within setup window"
     assert r.fsm.choch_search_start == 7
-    r.fsm.on_1m_bar(r.bars_1m[7])
+    r.fsm.on_ltf_bar(r.bars_ltf[7])
     assert r.fsm.state is State.HUNT_CHOCH
 
 
@@ -280,7 +280,7 @@ def test_start_session_resets_but_keeps_prior_zones():
     assert r.fsm.state is State.DONE
     r.fsm.start_session(date(2026, 9, 29))
     assert r.fsm.state is State.IDLE
-    assert r.fsm.bars_1m == []
+    assert r.fsm.bars_ltf == []
     assert r.fsm.transitions == []
     assert Direction.BULLISH in r.fsm.zones
 

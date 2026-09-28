@@ -13,7 +13,6 @@ from fvg_bot.strategy.swings import find_choch
 from fvg_bot.strategy.types import Bar, Direction
 
 BAR_15M = timedelta(minutes=15)
-BAR_1M = timedelta(minutes=1)
 
 
 class State(Enum):
@@ -65,10 +64,14 @@ EntryCheck = Callable[[Setup, float, datetime], EntryDecision]
 
 
 class EntryFSM:
-    """Entry states 00-07. Bars are passed when closed, stamped with their start time."""
+    """Entry states 00-07. Bars are passed when closed, stamped with their start time.
+
+    LTF bars are cfg.ltf_minutes long (1m in the spec).
+    """
 
     def __init__(self, cfg: Config, entry_check: EntryCheck, session_date: date):
         self.cfg = cfg
+        self._ltf_len = timedelta(minutes=cfg.ltf_minutes)
         self._entry_check = entry_check
         self.zones: Dict[Direction, FVG] = {}
         self.bars_15m: List[Bar] = []
@@ -78,7 +81,7 @@ class EntryFSM:
         self.session_open = datetime.combine(session_date, self.cfg.session_open, tzinfo=ET)
         self.state = State.IDLE
         self.transitions: List[Transition] = []
-        self.bars_1m: List[Bar] = []
+        self.bars_ltf: List[Bar] = []
         self.bars_15m = self.bars_15m[-2:]
         if not self.cfg.include_prior_zones:
             self.zones = {}
@@ -103,16 +106,16 @@ class EntryFSM:
         if self.state in (State.SCAN_15M, State.WAIT_REBALANCE):
             self._go(now, self._scan_state(), self._scan_reason())
 
-    def on_1m_bar(self, bar: Bar) -> None:
-        now = to_et(bar.ts) + BAR_1M
-        self.bars_1m.append(bar)
+    def on_ltf_bar(self, bar: Bar) -> None:
+        now = to_et(bar.ts) + self._ltf_len
+        self.bars_ltf.append(bar)
         self._on_time(now)
-        i = len(self.bars_1m) - 1
+        i = len(self.bars_ltf) - 1
         if self.state is State.HUNT_CHOCH:
-            choch = find_choch(self.bars_1m, self.active_zone.direction, self.choch_search_start, i)
+            choch = find_choch(self.bars_ltf, self.active_zone.direction, self.choch_search_start, i)
             if choch is not None:
                 self.choch_index = choch
-                self._go(now, State.VALIDATE_SETUP, "1m ChoCh")
+                self._go(now, State.VALIDATE_SETUP, "LTF ChoCh")
         elif self.state is State.VALIDATE_SETUP:
             self._validate(now, i)
 
@@ -157,7 +160,7 @@ class EntryFSM:
         for zone in sorted(self.zones.values(), key=lambda z: z.ts, reverse=True):
             if in_zone(zone, price):
                 self.active_zone = zone
-                self.touch_index = len(self.bars_1m)
+                self.touch_index = len(self.bars_ltf)
                 self.choch_search_start = self.touch_index
                 self._go(now, State.HUNT_CHOCH, f"rebalance into {zone.direction.value} 15m FVG")
                 return
@@ -165,7 +168,7 @@ class EntryFSM:
     def _validate(self, now: datetime, i: int) -> None:
         cfg = self.cfg
         setup = find_setup(
-            self.bars_1m,
+            self.bars_ltf,
             self.active_zone.direction,
             self.touch_index,
             self.choch_index,
@@ -173,6 +176,8 @@ class EntryFSM:
             max_bars=cfg.setup_window_bars,
             stop_buffer=cfg.stop_buffer,
             ratios=cfg.zone_ratios,
+            min_fvg_width=cfg.min_fvg_width,
+            stop_mode=cfg.stop_mode,
         )
         if setup is not None:
             decision = self._entry_check(setup, setup.entry_level, now)
@@ -181,9 +186,9 @@ class EntryFSM:
                 return
             self.setup = setup
             self.armed_at = now
-            self._go(now, State.ARMED, "1m FVG in discount zone")
+            self._go(now, State.ARMED, "LTF FVG in discount zone")
         elif i - self.choch_index >= cfg.setup_window_bars:
-            self._rehunt(now, "no qualifying 1m FVG within setup window")
+            self._rehunt(now, "no qualifying LTF FVG within setup window")
 
     def _armed_tick(self, now: datetime, price: float) -> Optional[EntryIntent]:
         s = self.setup
@@ -201,8 +206,10 @@ class EntryFSM:
             if not decision.ok:
                 self._rehunt(now, f"entry filter failed: {decision.reason}")
                 return None
-            self._go(now, State.SUBMIT_ORDER, "touched 1m FVG mid")
+            self._go(now, State.SUBMIT_ORDER, "touched LTF FVG mid")
             return EntryIntent(now, s, decision.plan, price)
+        if not self.cfg.abort_on_new_extreme:
+            return None
         if (price > s.swing_high) if bull else (price < s.swing_low):
             self._rehunt(now, "price exceeded swing extreme without retrace")
         return None
@@ -222,7 +229,7 @@ class EntryFSM:
         self.setup = None
         self.armed_at = None
         self.choch_index = None
-        self.choch_search_start = len(self.bars_1m)
+        self.choch_search_start = len(self.bars_ltf)
         self._go(now, State.HUNT_CHOCH, reason)
 
     def _drop_zone(self, now: datetime, reason: str) -> None:

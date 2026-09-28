@@ -36,10 +36,17 @@ def impulse_range(
     return min(b.low for b in leg), max(b.high for b in origin)
 
 
+STOP_MODES = ("fvg", "swing")
+
+
 def stop_level(fvg: FVG, buffer: float) -> float:
     if fvg.direction is Direction.BULLISH:
         return fvg.bottom - buffer
     return fvg.top + buffer
+
+
+def swing_stop_level(direction: Direction, swing_low: float, swing_high: float, buffer: float) -> float:
+    return swing_low - buffer if direction is Direction.BULLISH else swing_high + buffer
 
 
 def find_setup(
@@ -51,6 +58,8 @@ def find_setup(
     max_bars: int = 5,
     stop_buffer: float = 0.03,
     ratios: Tuple[float, float] = DISCOUNT_ZONE,
+    min_fvg_width: float = 0.0,
+    stop_mode: str = "fvg",
 ) -> Optional[Setup]:
     """Most recent 1m FVG confirmed within max_bars after the ChoCh that qualifies as of as_of.
 
@@ -66,6 +75,8 @@ def find_setup(
         fvg = fvg_at(bars, i)
         if fvg is None or fvg.direction is not direction:
             continue
+        if fvg.top - fvg.bottom < min_fvg_width:
+            continue
         if fvg.bottom < swing_low or fvg.top > swing_high:
             continue
         if not zone.contains(fvg.mid):
@@ -79,6 +90,10 @@ def find_setup(
             swing_high=swing_high,
             zone=zone,
             entry_level=fvg.mid,
-            stop_level=stop_level(fvg, stop_buffer),
+            stop_level=(
+                stop_level(fvg, stop_buffer)
+                if stop_mode == "fvg"
+                else swing_stop_level(direction, swing_low, swing_high, stop_buffer)
+            ),
         )
     return None

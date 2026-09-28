@@ -1,4 +1,4 @@
-# Dual-Timeframe FVG Options Bot: Design Spec (v2)
+# Dual-Timeframe FVG Options Bot: Design Spec (v2.1)
 
 **Status:** design only, no code yet. Supersedes the vertical-debit-spread spec.
 **Mode:** Alpaca paper trading only until every Tier 4 check in section 10 passes.
@@ -19,6 +19,8 @@
 | Stop | Script-managed on the **underlying** (tick through stop level plus buffer). Broker-side **disaster stop** on the option as a crash backstop. |
 | Take-profit | Script-managed. Not resting at the broker, because it would collide with the disaster stop (both are sells of the same contracts). |
 | Order style | Marketable limits only. Never raw market orders on 0DTE options. |
+| Disaster stop type | Broker-side `stop_limit` (single-leg only) with a generous limit offset. A plain `stop` becomes a market order when triggered, which can fill badly on a wide 0DTE spread. |
+| Reward target | 4R is **net of costs** (minimum 3R net). Costs stay inside R; they are not stripped out of the target. |
 | Heartbeat | Based on **connection health** (ping/pong plus reconnect and reconcile), not a 3-second data-silence timer. |
 | EOD flatten | 15:45 ET, or 15 minutes before close on early-close days (read the close time from the Alpaca calendar). |
 | Clock | All logic in `America/New_York` via `zoneinfo`. Never use local machine time. |
@@ -35,6 +37,8 @@
 | D6 | How many 1m bars after ChoCh to wait for a qualifying 1m FVG. | 5. Test 5 / 10 / 15. |
 | D7 | Entry trigger. | Underlying touches 1m FVG midpoint, then submit marketable limit (section 7). |
 | D8 | Data feed. | SIP for stock bars and OPRA for option quotes in live. IEX-only 1m bars can create or erase FVGs that are not on the consolidated tape. |
+| D9 | Risk budget vs typical stop distance. **First backtest task:** histogram of stop distance (half the 1m FVG width plus buffer) on SPY/QQQ, then set `RISK_BUDGET` from it. | $25-50 was sized for spreads. Expect to raise it if most setups need more than one contract's worth of R. |
+| D10 | Cost filter threshold. | 15% of R (was 25%). Tighten further if the backtest shows cost drag. |
 
 ## 3. Definitions
 
@@ -66,7 +70,8 @@ TP_premium    = entry_fill + 4 * R_prem                          # min 3R
 disaster_stop = entry_fill - 1.5 * R_prem                        # broker-side backstop
 ```
 - `est_round_trip_cost` = (ask - mid) at entry + (mid - bid) at exit + `EXIT_SLIPPAGE_PAD`.
-- **Cost filter:** skip the trade if `est_round_trip_cost > 0.25 * R_prem`. A tight FVG stop can make R only a few cents, and then spread costs alone eat the edge.
+- **Cost filter:** skip the trade if `est_round_trip_cost > 0.15 * R_prem` (D10). A tight FVG stop can make R only a few cents, and then spread costs alone eat the edge.
+- **Why costs stay in the target:** with `d*s = stop_distance * delta` and round-trip cost `c` paid once, a stop-out loses `d*s + c`, and `TP = fill + 4*R_prem` nets `4*d*s + 3*c`. Example: `d*s = 0.24`, `c = 0.10` gives about 3.7:1 net. Stripping `c` out of the target (`entry + 4*d*s + c`) nets only `4*d*s`, about 2.8:1, which is below the 3R floor. The price of a net 4R is a farther target and a lower hit rate as `c` grows; control that with the cost filter, not by weakening the ratio.
 - **Minimum stop:** skip if `stop_distance < MIN_STOP_DISTANCE` (tune per symbol).
 - **Disaster loss cap:** `contracts * 100 * 1.5 * R_prem` (plus slippage pad) must be <= `DAILY_LOSS_LIMIT`. Reduce contracts until it is.
 
@@ -88,8 +93,11 @@ disaster_stop = entry_fill - 1.5 * R_prem                        # broker-side b
 [04 VALIDATE_SETUP] --no qualifying 1m FVG within D6 bars--> [03]
 [04 VALIDATE_SETUP] --qualifying 1m FVG in discount zone--> [05 ARMED]
 
-[05 ARMED] --underlying touches FVG mid + all filters pass--> [06 SUBMIT_ORDER]
-[05 ARMED] --setup expires (see table)--> [03]
+[05 ARMED] evaluated on every tick, in this order:
+             1. stop level breached            --> [03]
+             2. gap guard fails                --> [03]
+             3. touch FVG mid + filters pass   --> [06 SUBMIT_ORDER]
+             4. any other expiry (see table)   --> [03]
 
 [06 SUBMIT_ORDER] --filled--> [Position Manager P1]
 [06 SUBMIT_ORDER] --not filled after retries--> [03]
@@ -136,11 +144,13 @@ New state vs the original spec: **05 ARMED**. The original jumped from validatio
 | 03 | Bullish/bearish 1m ChoCh (close-based) | 04 | Freeze swing_low/high; start D6 bar counter. |
 | 04 | 1m FVG in discount zone within D6 bars | 05 | Compute stop level, R, contracts, TP; run option selection filters (section 8). |
 | 04 | Counter expired | 03 | Reset swing tracking. |
-| 05 | Underlying touches FVG mid AND all filters pass | 06 | Freeze option contract; submit entry. |
-| 05 | Expiry: price exceeds swing extreme without retrace, OR stop level breached, OR 11:30 passed, OR 10 min elapsed (tunable) | 03 (or 07 if 11:30 passed) | Log reason. |
+| 05 | Underlying touches FVG mid AND all filters pass, evaluated only after the stop-breach and gap-guard checks below pass on the same tick | 06 | Freeze option contract; submit entry. |
+| 05 | Gap guard: the first tick at or through the mid is already beyond it by more than `GAP_GUARD` (default 50% of the mid-to-stop distance) | 03 | Log reason. Do not chase. |
+| 05 | Stop level breached before entry (checked first, every tick) | 03 | Log reason. |
+| 05 | Expiry: price exceeds swing extreme without retrace, OR 11:30 passed, OR 10 min elapsed (tunable) | 03 (or 07 if 11:30 passed) | Log reason. |
 | 05 | Any filter fails (cost, spread, min stop, contracts < 1) | 03 | Log reason. Not a trade. |
 | 06 | Filled | P1 | Mark trade counted for the day. |
-| P1 | Stop accepted | P2 | Save state to disk. |
+| P1 | Stop accepted | P2 | Save state to disk. Run the stop-level check immediately on entering P2 (the fill tick may already be through it). |
 | P2 | Any exit trigger | P4 | Set exit reason. |
 | P4 | Exit filled | P5 | Reconcile via REST. |
 | P5 | Any | 07 | If realized loss reaches DAILY_LOSS_LIMIT, lock engine for the session. |
@@ -185,16 +195,23 @@ New state vs the original spec: **05 ARMED**. The original jumped from validatio
 
 - **Tier 1, unit tests (pure logic):** FVG detection (including overlapping wicks returning none), swing detection with no lookahead, ChoCh fires on close only, Fib math to 4 decimals, R/sizing/cost-filter math, exit-sequence ordering with a fake broker.
 - **Tier 2, integration (Alpaca paper):** verify current API behaviour before relying on it (section 11). Assert order payload shape, contract selection, DTE filter, and that the entry never exceeds the slippage cap.
-- **Tier 3, backtest:** must use **historical option quotes** for the actual contracts, not underlying price moves. Include spread and slippage. Use as long a history as available: six months at one trade per day gives roughly 40-80 trades, too few to distinguish an edge from luck at a ~30% win rate. Report confidence intervals, and test the D2-D6 variants without cherry-picking (hold out a final period).
+- **Tier 3, backtest:** first produce the stop-distance histogram (D9) and set `RISK_BUDGET` from it. The backtest then must use **historical option quotes** for the actual contracts, not underlying price moves. Include spread and slippage. Use as long a history as available: six months at one trade per day gives roughly 40-80 trades, too few to distinguish an edge from luck at a ~30% win rate. Report confidence intervals, and test the D2-D6 variants without cherry-picking (hold out a final period).
 - **Tier 4, paper burn-in (15+ trading days):** zero unhandled exceptions; log every state transition with timestamps; compare intended vs actual fills (alert if slippage exceeds the cost filter's assumption); confirm EOD flatten works unattended; kill the connection mid-trade and confirm reconnect and reconcile within 15 s; kill the process mid-trade and confirm the broker-side stop remains and startup reconciliation handles it.
 
-## 11. Verify against current Alpaca docs before coding
+## 11. Alpaca facts (checked against their docs on 2026-09-28) and remaining tests
 
-- Whether single-leg options support stop and stop-limit orders, and how they trigger (option price, not underlying).
-- Whether OCO or bracket orders are supported for options (the design assumes they are **not**).
-- Options data entitlements (OPRA), snapshot vs streaming quotes, and rate limits.
-- Account approval level required for long options, and any day-trading rules that apply to your account size.
-- Order **replace** support and behaviour for options.
+Confirmed in the docs:
+- Single-leg options accept `market`, `limit`, `stop` and `stop_limit`; `stop` and `stop_limit` are single-leg only.
+- `time_in_force` must be `day` or `gtc`, `qty` must be a whole number, and `extended_hours` must be false.
+- Buying a call or put needs options level 2; spreads need level 3.
+- Real-time OPRA quotes need the paid Algo Trader Plus plan plus a signed OPRA agreement. The free tier is the indicative feed: quotes are modified and trades are delayed 15 minutes. **Do not run the cost filter or marketable-limit logic on indicative data**, including in paper trading (data access follows your subscription, not the account type).
+
+Not confirmed (docs silent; test in paper):
+- OCO, OTO or bracket orders on options. The design assumes they are not supported.
+- Order replace (`PATCH /v2/orders/{id}`) on options orders. Fallback: cancel, confirm terminal status, submit a new order.
+- How a triggered `stop_limit` on an option fills in thin quotes. Measure it.
+- Rate limits on the order and data endpoints.
+- Any day-trading or intraday-margin rule that applies at your account size (check Alpaca's current docs).
 
 ## 12. Suggested project layout (for Claude Code)
 

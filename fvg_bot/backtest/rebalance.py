@@ -37,6 +37,7 @@ HORIZONS = (15, 60)
 WIN, LOSS, OPEN = "win", "loss", "open"
 SESSION_OPEN = time(9, 30)
 WINDOWS = {"am": (time(9, 45), time(11, 30)), "full": (time(9, 45), time(15, 0))}
+ZONE_TFS = ("15m", "60m", "1d")
 
 
 @dataclass
@@ -51,10 +52,16 @@ class Touch:
     stop_level: float
     brackets: Dict[int, str] = field(default_factory=dict)
     horizons: Dict[int, Optional[float]] = field(default_factory=dict)
+    kind: str = "fvg"
+    bracket_r: Dict[int, float] = field(default_factory=dict)  # move at exit, in R
 
     @property
     def stop_distance(self) -> float:
         return abs(self.entry_price - self.stop_level)
+
+    def net_r(self, k: int, cost: float) -> float:
+        """Bracket k outcome after a round-trip cost in underlying dollars."""
+        return self.bracket_r[k] - cost / self.stop_distance
 
 
 class TouchTracker:
@@ -64,6 +71,7 @@ class TouchTracker:
         self.flatten_at = flatten_at
         self.pending_brackets = list(BRACKETS)
         self.pending_horizons = list(HORIZONS)
+        self.last_move = 0.0
 
     @property
     def done(self) -> bool:
@@ -71,10 +79,11 @@ class TouchTracker:
 
     def on_tick(self, ts: datetime, price: float) -> bool:
         t = self.t
+        move = self.sign * (price - t.entry_price)
+        self.last_move = move
         if ts >= self.flatten_at:
             self.close_out()
             return True
-        move = self.sign * (price - t.entry_price)
         through_stop = self.sign * (price - t.stop_level) < 0
         for k in list(self.pending_brackets):
             if through_stop:
@@ -83,6 +92,7 @@ class TouchTracker:
                 t.brackets[k] = WIN
             else:
                 continue
+            t.bracket_r[k] = move / t.stop_distance
             self.pending_brackets.remove(k)
         for h in list(self.pending_horizons):
             if ts - t.entry_at >= timedelta(minutes=h):
@@ -91,8 +101,10 @@ class TouchTracker:
         return self.done
 
     def close_out(self) -> None:
+        """Unresolved brackets are marked at the last seen price."""
         for k in self.pending_brackets:
             self.t.brackets[k] = OPEN
+            self.t.bracket_r[k] = self.last_move / self.t.stop_distance
         for h in self.pending_horizons:
             self.t.horizons[h] = None
         self.pending_brackets = []
@@ -106,6 +118,17 @@ class StudyResult:
     sessions: int = 0
     touches: List[Touch] = field(default_factory=list)
     gapped_through: int = 0
+    skipped_tight: int = 0
+
+
+def session_bar(bars: Sequence[Bar]) -> Bar:
+    return Bar(
+        ts=bars[0].ts,
+        open=bars[0].open,
+        high=max(b.high for b in bars),
+        low=min(b.low for b in bars),
+        close=bars[-1].close,
+    )
 
 
 def study(
@@ -116,31 +139,41 @@ def study(
     window_name: str = "",
     stop_buffer: float = 0.03,
     session_close: Callable[[date], datetime] = regular_close,
+    zone_tf: str = "15m",
+    min_stop: float = 0.0,
 ) -> StudyResult:
+    """zone_tf: "15m" / "60m" (clock-aligned, extended hours) or "1d" (regular session)."""
+    if zone_tf not in ZONE_TFS:
+        raise ValueError(f"zone_tf must be one of {ZONE_TFS}, got {zone_tf!r}")
     entry_start, entry_end = window
     result = StudyResult(symbol, window_name)
     zones: Dict[Direction, FVG] = {}
     consumed: Set[FVG] = set()
-    bars_15m: List[Bar] = []
+    zone_bars: List[Bar] = []
 
-    def on_15m(bar: Bar) -> None:
-        bars_15m.append(bar)
-        del bars_15m[:-3]
+    def on_zone_bar(bar: Bar) -> None:
+        zone_bars.append(bar)
+        del zone_bars[:-3]
         for d, z in list(zones.items()):
             if is_invalidated(z, bar):
                 del zones[d]
-        fvg = fvg_at(bars_15m, len(bars_15m) - 1)
+        fvg = fvg_at(zone_bars, len(zone_bars) - 1)
         if fvg is not None:
             zones[fvg.direction] = fvg
 
-    m15 = Buckets(15, on_15m)
+    buckets = None if zone_tf == "1d" else Buckets(int(zone_tf[:-1]), on_zone_bar)
     for day in days:
         result.sessions += 1
         session_open = datetime.combine(day, SESSION_OPEN, tzinfo=ET)
-        flatten_at = session_close(day) - timedelta(minutes=15)
+        close = session_close(day)
+        flatten_at = close - timedelta(minutes=15)
         trackers: List[TouchTracker] = []
+        regular: List[Bar] = []
         for bar in load_day(day):
-            m15.add(bar)
+            if buckets:
+                buckets.add(bar)
+            if session_open <= bar.ts < close:
+                regular.append(bar)
             if bar.ts >= session_open:
                 in_window = entry_start <= bar.ts.time() <= entry_end
                 live = [z for z in zones.values() if z not in consumed] if in_window else []
@@ -156,29 +189,37 @@ def study(
                                 touch = Touch(
                                     symbol, day, z.direction, z.bottom, z.top, ts, price,
                                     z.bottom - stop_buffer if bull else z.top + stop_buffer,
+                                    kind=f"fvg_{zone_tf}",
                                 )
+                                if touch.stop_distance < min_stop:
+                                    result.skipped_tight += 1
+                                    continue
                                 result.touches.append(touch)
                                 trackers.append(TouchTracker(touch, flatten_at))
                             elif is_beyond_far_edge(z, price):
                                 consumed.add(z)
                                 result.gapped_through += 1
-            m15.close_if_complete(bar)
+            if buckets:
+                buckets.close_if_complete(bar)
         for trk in trackers:
             trk.close_out()
-    m15.flush()
+        if zone_tf == "1d" and regular:
+            on_zone_bar(session_bar(regular))
+    if buckets:
+        buckets.flush()
     return result
 
 
 # ---- reporting -----------------------------------------------------------------
 
 
-def _mean_ci(xs: Sequence[float]) -> Tuple[float, float]:
+def mean_ci(xs: Sequence[float], z: float = 1.96) -> Tuple[float, float]:
     n = len(xs)
     if n < 2:
         return (xs[0] if xs else float("nan")), float("nan")
     m = sum(xs) / n
     sd = math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
-    return m, 1.96 * sd / math.sqrt(n)
+    return m, z * sd / math.sqrt(n)
 
 
 def bracket_rate(touches: Sequence[Touch], k: int) -> Tuple[float, float, int, float]:
@@ -200,7 +241,7 @@ def report_rows(label: str, touches: Sequence[Touch]) -> str:
         p, ci, _, open_share = bracket_rate(touches, k)
         parts.append(f"{k}R {p:4.0%}±{ci * 100:2.0f} (null {1 / (1 + k):.0%}, open {open_share:3.0%})")
     for h in HORIZONS:
-        m, ci = _mean_ci([t.horizons[h] for t in touches if t.horizons.get(h) is not None])
+        m, ci = mean_ci([t.horizons[h] for t in touches if t.horizons.get(h) is not None])
         parts.append(f"+{h}m {m:+.2f}±{ci:.2f}R")
     return "  ".join(parts)
 

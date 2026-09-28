@@ -7,6 +7,9 @@ Newest findings at the top of each section; every number here came from a run in
 
 **No edge found.** The spec strategy and 272 variants of it lose money in-sample on SPY/QQQ,
 and the base layer (the raw 15m FVG rebalance) is indistinguishable from a coin flip.
+Higher-timeframe levels with a shares cost model (E5) found nothing pre-registered; a
+breakout pattern at prior-day/overnight highs and lows looked promising in-sample with
+$1.00 stops (E6) but **failed on the 2026 holdout (E7)**. The holdout is now spent.
 Execution work (broker, orders, position manager) and buying historical option quotes are
 on hold until a new hypothesis shows gross edge on the underlying.
 
@@ -26,8 +29,8 @@ on hold until a new hypothesis shows gross edge on the underlying.
 - **Coverage:** SPY and QQQ, 2024-02-01 to 2026-09-25, 665 sessions each (~84 MB).
 - **Location:** `historical_data/` (gitignored). Download: `python3 -m fvg_bot.data.download --start 2024-02-01`.
 - **In-sample / holdout:** sweeps and studies use days before 2026-01-01 (~481 sessions per
-  symbol). **2026-01-01 onward has never been evaluated** and should stay that way until a
-  candidate strategy is frozen.
+  symbol). 2026-01-01 to 2026-09-25 (184 sessions) was the holdout; it was **spent once on
+  the frozen E7 breakout rule** and is no longer clean. New tests need new data.
 
 ### What the data sources can and cannot provide (checked 2026-09-28)
 - Alpaca has historical option **bars and trades only, since Feb 2024**. There is **no
@@ -91,6 +94,162 @@ These apply to every result below.
 ---
 
 ## 4. Experiments
+
+### E7. Frozen breakout rule on the 2026 holdout (pre-registered 2026-09-28, before any run)
+**Recorded deviation:** E6 failed its own bar, which said to drop the pattern. The user chose
+(2026-09-28) to spend the holdout on one frozen rule instead. This is that single test.
+
+Frozen rule (no further changes):
+- Levels PDH, PDL, ONH, ONL; side fixed at the first tick at or after 09:45; entry at the first
+  tick at or through the level from that side, **in the crossing direction**. Each level once
+  per day.
+- Window 09:45-11:30. Stop **$1.00** from entry, target **+$1.00 (1R)**. Flatten at close - 15m.
+- SPY and QQQ. Scored with **worst-case** intrabar ordering (as E6).
+- Data: 2026-01-01 to 2026-09-25 (the last cached day). The 2025-12-31 session is loaded only
+  to set the first day's prior-day levels; no 2025 trades count.
+- In-sample reference (E6, same rule): n=1,299, hit 55%, net +0.073 +/- 0.054R
+  (SPY +0.091, QQQ +0.055).
+
+Decision (one look, directional hypothesis, so one-sided 95%: z = 1.645):
+- **PASS:** pooled mean net R at $0.02/share minus 1.645 x SE > 0, **and** SPY and QQQ each
+  positive, **and** pooled mean net R at a $0.05/share slippage stress > 0, **and** n >= 30.
+  Next: design share execution and paper trade forward.
+- **INCONCLUSIVE:** pooled mean net R at $0.02 > 0 but not every PASS condition holds.
+  Next: log signals forward in paper (no capital) until ~500 new trades, then apply the same bar.
+- **FAIL:** pooled mean net R at $0.02 <= 0. Next: drop level breakouts.
+
+Power note: ~500 trades expected, SE ~0.045R. If the true edge is +0.07R, P(PASS) is roughly
+45%; at +0.035R, roughly 15%. A non-PASS is therefore weak evidence against a small edge.
+
+**Result (2026-09-28): FAIL.** Run once with
+`python3 -m fvg_bot.backtest.holdout --i-understand-this-uses-the-holdout` (output saved to
+`backtest_output/holdout_E7.txt`). 184 sessions per symbol, 2026-01-02 to 2026-09-25. Before
+the run, the same pipeline on in-sample days reproduced the E6 reference exactly (n=1,299,
++0.073R).
+
+| | n | Hit (worst) | Net R @ $0.02 (95%) | Net R @ $0.05 | Heuristic net @ $0.02 |
+|---|---|---|---|---|---|
+| SPY | 254 | 51% +/- 6 | +0.002 +/- 0.123 | -0.028 | +0.087 |
+| QQQ | 250 | 48% +/- 6 | -0.060 +/- 0.124 | -0.090 | +0.106 |
+| **Pooled** | **504** | **50% +/- 4** | **-0.029 +/- 0.087** | **-0.059** | +0.096 |
+
+- Pooled mean net R is below zero, so the pre-registered outcome is FAIL: **level breakouts
+  are dropped.** The in-sample +0.073R did not carry over; the hit rate fell from 55% to 50%.
+- The heuristic column stayed positive (+0.10R), but the gap between it and the worst case
+  widened from ~0.035R in-sample to ~0.125R here. That means more 2026 trades resolved inside
+  the entry bar, where the synthetic path cannot be trusted; it is the same effect that
+  produced the false $0.50 result in E5/E6.
+- The holdout is now spent. Any further test needs new data (forward paper logging) or a
+  different market.
+
+### E6. Level breakouts under worst-case intrabar ordering (pre-registered 2026-09-28, before any run)
+Hypothesis from E5 (not yet tested): trading **through** PDH/PDL/ONH/ONL beats the null.
+Same levels, side rule, touch rule, windows, cost ($0.02/share), fixed stops ($0.50 and
+$1.00) and brackets (+1R, +2R before -1R) as E5, but the trade goes **in the crossing
+direction**. In-sample only; holdout untouched.
+
+Each trade is scored three ways from the entry bar onward:
+- **worst:** any bar whose range reaches both the stop and the target counts as a loss; in
+  the entry bar, the bar's adverse extreme is assumed to come after the entry.
+- **heuristic:** the synthetic tick path used in E1-E5.
+- **best:** target first whenever a bar reaches both; in the entry bar only a close beyond
+  the stop counts as adverse.
+Gaps through a level at a later bar's open exit at that open. Unresolved at close - 15m:
+marked at the flatten bar's open.
+
+**Pass bar (worst ordering only)**, per stop x window x bracket (8 looks, z = 3 kept):
+pooled SPY+QQQ mean net R - 3 x SE > 0, each symbol's mean net R > 0, pooled n >= 30.
+
+If a check passes: verify the entry minutes against real SIP trade prints, then evaluate the
+frozen rule once on the 2026 holdout. If none passes, the E5 breakout pattern is treated as
+unproven (possibly a path artifact) and dropped unless real tick data says otherwise.
+
+**Result (2026-09-28): 0 of 8 checks passed.** `python3 -m fvg_bot.backtest.breakout` (~16 s).
+Pooled SPY+QQQ, net R after $0.02/share, +/- 95% (the pass bar used 3 x SE).
+
+| Stop | Window | n | 1R resolved in entry bar | 1R hit worst / heuristic / best | 1R net, worst | 2R net, worst |
+|---|---|---|---|---|---|---|
+| $0.50 | am | 1,299 | 27% | 42% / 54% / 54% | -0.20 +/- 0.05 | -0.12 +/- 0.08 |
+| $0.50 | full | 1,743 | 27% | 42% / 54% / 55% | -0.21 +/- 0.05 | -0.16 +/- 0.07 |
+| $1.00 | am | 1,299 | 4% | 55% / 57% / 57% | +0.07 +/- 0.05 | +0.10 +/- 0.08 |
+| $1.00 | full | 1,743 | 5% | 54% / 56% / 56% | +0.04 +/- 0.05 | +0.05 +/- 0.06 |
+
+- **$0.50 stops: the E5 pattern was a path artifact.** A quarter of trades resolve inside the
+  entry bar, and the hit rate swings from 42% (worst) to 54% (heuristic) on the ordering
+  assumption alone. Worst case is clearly negative.
+- **$1.00 stops: the ordering barely matters** (4-5% resolve in the entry bar; worst is within
+  2-3 points of heuristic). Worst-case net is positive for both symbols and, in the morning
+  window, for all four levels. It misses the z = 3 bar narrowly: am 1R lower bound -0.01R,
+  am 2R -0.01R; the 95% interval excludes zero for am 1R (+0.02 to +0.13) and am 2R.
+- The heuristic column mirrors E5's fade results (e.g. $1.00 full: fade 44%, breakout 56%),
+  a consistency check on the two implementations.
+- **Caveats:** this is the same in-sample data that suggested the idea, so it is not
+  independent evidence. The edge is small (~+0.04 to +0.07R net per trade), and breakout
+  entries usually fill worse than the level price: an extra $0.03 of slippage costs 0.03R at
+  a $1.00 stop, around half the estimated edge.
+- **Per the pre-registration, the pattern is unproven.** Continuing would mean freezing a
+  single rule and testing it once on the 2026 holdout (a deliberate, recorded decision, not
+  a pass).
+
+### E5. Higher-timeframe levels, shares cost model (pre-registered 2026-09-28, before any run)
+Instrument assumption changes to **shares** (SPY/QQQ): round-trip cost $0.02 per share
+(penny spread + $0.01 slippage), no option wrapper. Stop floor **$0.50**, so size and cost
+stay workable with shares or a 3x ETF ($50 risk at a $0.50 stop is 100 SPY shares, ~$70k,
+and costs are ~4% of R).
+In-sample only (before 2026-01-01); holdout untouched.
+
+Tests (entry at the first qualifying tick, one entry per zone or level):
+1. **1h FVG** (clock-aligned 60m bars from extended hours): trade in the FVG direction, stop
+   beyond the far edge + $0.03. Skip if the stop distance is under $0.50.
+2. **Daily FVG** (RTH daily bars): same rule.
+3. **Levels, fixed $0.50 stop:** prior-day RTH high/low (PDH/PDL) and overnight high/low
+   (ONH/ONL, prior 16:00 to 09:30). Side is fixed at the first in-window tick; a touch is the
+   first tick at or through the level from that side. Trade the **fade** (back toward the side
+   price came from). A fade hit rate below the null means breakouts carry the information.
+4. **Levels, fixed $1.00 stop:** same.
+
+Windows 09:45-11:30 and 09:45-15:00. Brackets +1R and +2R before -1R, flatten at close - 15m
+(unresolved trades marked at the flatten price).
+
+**Pass bar**, per test x window x bracket (16 looks, so z = 3 instead of 1.96):
+- pooled SPY+QQQ mean **net** R (bracket outcome minus $0.02 / stop distance) has a lower
+  bound (mean - 3 x SE) above 0, **and**
+- SPY and QQQ each have a positive mean net R.
+- at least 30 pooled trades (added before the first run, after a unit test showed a tiny
+  zero-variance sample could otherwise pass).
+
+A pass only earns a closer look (costs with real quotes, path-order sensitivity, then the
+holdout once). It is not a strategy.
+
+**Result (2026-09-28): 0 of 16 checks passed.** `python3 -m fvg_bot.backtest.htf` (~25 s).
+Pooled SPY+QQQ; hit = +1R before -1R among resolved; net = mean R after $0.02/share.
+
+| Test | Window | n | Stop p50 | 1R hit (null 50%) | 1R net R | 2R hit (null 33%) | 2R net R |
+|---|---|---|---|---|---|---|---|
+| 1h FVG | am | 323 | $1.31 | 46% +/- 6 | -0.06 +/- 0.10 | 26% +/- 6 | -0.08 +/- 0.13 |
+| 1h FVG | full | 521 | $1.20 | 49% +/- 5 | -0.02 +/- 0.08 | 29% +/- 5 | -0.00 +/- 0.10 |
+| Daily FVG | am | 126 | $2.77 | 58% +/- 11 | +0.08 +/- 0.15 | 27% +/- 12 | +0.01 +/- 0.18 |
+| Daily FVG | full | 139 | $2.92 | 57% +/- 10 | +0.08 +/- 0.14 | 24% +/- 11 | -0.01 +/- 0.16 |
+| Levels fade, $0.50 | am | 1,299 | $0.50 | 46% +/- 3 | -0.12 +/- 0.06 | 30% +/- 2 | -0.15 +/- 0.08 |
+| Levels fade, $0.50 | full | 1,743 | $0.50 | 46% +/- 2 | -0.13 +/- 0.05 | 30% +/- 2 | -0.15 +/- 0.07 |
+| Levels fade, $1.00 | am | 1,299 | $1.00 | 44% +/- 3 | -0.15 +/- 0.05 | 26% +/- 2 | -0.20 +/- 0.07 |
+| Levels fade, $1.00 | full | 1,743 | $1.00 | 44% +/- 3 | -0.13 +/- 0.05 | 26% +/- 2 | -0.16 +/- 0.06 |
+
+- **1h FVG:** at the null. 236-393 touches were skipped for stops under $0.50.
+- **Daily FVG:** 57-58% at 1R, but n is small, the interval is wide, 34-37% of trades are
+  still open at the flatten (daily stops ~$2.8 rarely resolve in a day), and SPY at 2R is
+  below the null. Not a pass; not strong enough to chase.
+- **Level fades lose, consistently:** 44-46% at 1R with +/-2-3%, in both symbols, all four
+  levels (PDH, PDL, ONH, ONL), both windows and both stop sizes. At the symmetric 1R bracket
+  the breakout trade is the exact mirror, so **continuation through the level hit +1R first
+  54-56% of the time** (roughly +0.09 to +0.13R net). This was not the pre-registered
+  direction, so it is a new hypothesis, not a pass.
+- **Artifact risk for that pattern:** the synthetic path moves low-then-high inside an up bar
+  (high-then-low inside a down bar). When a bar crosses a level, the path therefore reaches
+  that bar's extreme in the crossing direction before any pullback, which favours
+  continuation whenever a bracket resolves inside the entry bar. E4's slight sub-50% bounce
+  rate at 15m FVGs leans the same way. This must be ruled out (worst-case ordering in the
+  entry bar, or real trade ticks) before the breakout idea is taken seriously.
 
 ### E4. Raw 15m FVG rebalance (base layer), 2026-09-28
 `python3 -m fvg_bot.backtest.rebalance`. Enter at the first tick inside an active 15m FVG in
@@ -188,7 +347,7 @@ Baseline and one change at a time, unfiltered, exit prem_45:
 - Intrabar path order sensitivity (`order="low_first"` / `"high_first"` in `backtest/ticks.py`).
 - Higher HTF zones (1h, 4h, daily) or other symbols (e.g. IWM, single stocks).
 - Fading the rebalance as a strategy (only inferred from E4: ~52% gross at 1R).
-- The 2026 holdout.
+- Real trade ticks (Alpaca SIP trades) to settle intrabar ordering, which decided E5-E7.
 
 ## 6. Bugs found along the way
 
@@ -203,12 +362,15 @@ Baseline and one change at a time, unfiltered, exit prem_45:
 ## 7. Reproducing
 
 ```bash
-python3 -m pytest -q                                   # 170 tests
+python3 -m pytest -q                                   # 197 tests
 python3 -m fvg_bot.data.download --start 2024-02-01    # needs APCA_API_KEY_ID / APCA_API_SECRET_KEY
 python3 -m fvg_bot.backtest.d9                         # E1
 python3 -m fvg_bot.backtest.sweep --grid spec          # E2
 python3 -m fvg_bot.backtest.sweep --grid ltf           # E3
 python3 -m fvg_bot.backtest.rebalance                  # E4
+python3 -m fvg_bot.backtest.htf                        # E5
+python3 -m fvg_bot.backtest.breakout                   # E6
+python3 -m fvg_bot.backtest.holdout --i-understand-this-uses-the-holdout   # E7 (already spent)
 ```
 Outputs go to `backtest_output/` (gitignored): `d9_setups_*.csv`, `sweep_<grid>/summary.csv`,
 `sweep_<grid>/trades.csv`, `sweep_<grid>/results.pkl`.

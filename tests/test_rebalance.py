@@ -104,3 +104,58 @@ def test_report_rows_formats():
     assert "n=   0" in report_rows("x", [])
     row = report_rows("SPY long ", [_touch(WIN), _touch(LOSS)])
     assert "1R  50%" in row and "+15m +0.50" in row
+
+
+def test_bracket_r_records_exit_and_mark():
+    (t,) = zone_touches(run([TOUCH_BAR, (100.8, 101.8, 100.8, 101.75)]))
+    assert t.bracket_r[1] == pytest.approx((101.73 - ENTRY) / DIST)
+    assert t.bracket_r[4] == pytest.approx((101.75 - ENTRY) / DIST)
+    assert t.net_r(1, 0.02) == pytest.approx(t.bracket_r[1] - 0.02 / DIST)
+
+
+def test_stop_floor_skips_tight_zones():
+    r = run([TOUCH_BAR, (100.8, 101.8, 100.8, 101.75)], min_stop=2.0)
+    assert zone_touches(r) == []
+    assert r.skipped_tight >= 1
+
+
+def test_session_bar():
+    from fvg_bot.backtest.rebalance import session_bar
+
+    b = session_bar([Bar(at(9, 30), 1.0, 2.0, 0.5, 1.5), Bar(at(9, 31), 1.5, 3.0, 1.0, 2.5)])
+    assert (b.ts, b.open, b.high, b.low, b.close) == (at(9, 30), 1.0, 3.0, 0.5, 2.5)
+
+
+def test_daily_zone():
+    # Daily bars (h, l): (100, 99), (102, 100.5), (103, 101) form a bullish daily FVG [100, 101]
+    # at day 3's close. Day 4 dips into it from 101.5.
+    from datetime import date as _date
+
+    days = [_date(2026, 9, 21), _date(2026, 9, 22), _date(2026, 9, 23), _date(2026, 9, 24)]
+    ranges = [(100.0, 99.0), (102.0, 100.5), (103.0, 101.0)]
+
+    def t(d, h, m):
+        return datetime(d.year, d.month, d.day, h, m, tzinfo=ET)
+
+    data = {}
+    for d, (hi, lo) in zip(days, ranges):
+        data[d] = [Bar(t(d, 9, 30), lo, hi, lo, hi)] + [Bar(t(d, 9, 31 + i), hi, hi, hi, hi) for i in range(5)]
+    d4 = days[3]
+    data[d4] = [Bar(t(d4, 9, 45), 101.5, 101.5, 101.5, 101.5), Bar(t(d4, 9, 46), 101.5, 101.5, 100.8, 100.9)] + [
+        Bar(t(d4, 9, 47 + i), 100.9, 100.9, 100.9, 100.9) for i in range(5)
+    ]
+    r = study("SPY", days, data.__getitem__, WINDOWS["full"], "full", zone_tf="1d", min_stop=0.5)
+    (touch,) = r.touches
+    assert touch.kind == "fvg_1d"
+    assert touch.day == d4
+    assert touch.direction is Direction.BULLISH
+    assert (touch.zone_bottom, touch.zone_top) == (100.0, 101.0)
+    assert touch.entry_price == pytest.approx(101.0)
+    assert touch.stop_level == pytest.approx(99.97)
+
+
+def test_hourly_zone_kind_and_bad_tf():
+    r = study("SPY", [D], lambda d: day([TOUCH_BAR]), WINDOWS["full"], "full", zone_tf="60m")
+    assert all(t.kind == "fvg_60m" for t in r.touches)
+    with pytest.raises(ValueError):
+        study("SPY", [D], lambda d: [], WINDOWS["full"], zone_tf="4h")

@@ -1,6 +1,6 @@
 # Dual-Timeframe FVG Options Bot: Design Spec (v2.1)
 
-**Status:** design only, no code yet. Supersedes the vertical-debit-spread spec.
+**Status:** strategy logic, sizing, contract selection, entry FSM, data cache and backtest harness are built and tested; execution (`execution/`, position manager, SQLite store) is not, and is on hold because backtests found no edge. Supersedes the vertical-debit-spread spec.
 **Mode:** Alpaca paper trading only until every Tier 4 check in section 10 passes.
 **Disclaimer:** this automates one discretionary technical-analysis methodology. Nothing here is a validated edge. Treat the backtest as the judge, not the strategy's reputation.
 **Research log:** read `docs/research_log.md` before new work. It records spec interpretations, harness assumptions and every backtest so far (as of 2026-09-28: no edge found; execution work on hold).

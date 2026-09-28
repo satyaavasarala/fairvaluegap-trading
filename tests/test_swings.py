@@ -115,6 +115,14 @@ def test_choch_uses_most_recent_swing_not_older_higher_one():
     assert find_choch(bars, Direction.BULLISH, start=2) == 5
 
 
+def test_swing_broken_before_start_is_spent():
+    # 11.0 is broken at idx 4 and highs keep rising, so no new swing forms. Searching from
+    # idx 5 must not re-fire on the next close above the spent 11.0.
+    bars = make_bars(BULL_CHOCH_ROWS + [(11.1, 11.5, 11.0, 11.4), (11.4, 11.6, 11.3, 11.5)])
+    assert find_choch(bars, Direction.BULLISH, start=4) == 4
+    assert find_choch(bars, Direction.BULLISH, start=5) is None
+
+
 def test_no_swing_no_choch():
     bars = hl([(10.0, 9.0), (11.0, 10.0), (12.0, 11.0), (13.0, 12.0)])
     assert find_choch(bars, Direction.BULLISH, start=0) is None

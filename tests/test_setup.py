@@ -5,26 +5,10 @@ from fvg_bot.strategy.fvg import fvg_at
 from fvg_bot.strategy.setup import find_setup, impulse_range, stop_level
 from fvg_bot.strategy.swings import find_choch
 from fvg_bot.strategy.types import Direction
+from tests.bars import SETUP_SCENARIO as SCENARIO
+from tests.bars import SETUP_SCENARIO_CHOCH as CHOCH
+from tests.bars import SETUP_SCENARIO_TOUCH as TOUCH
 from tests.bars import make_bars, mirror
-
-# Bullish walk-through:
-#   idx 1  swing high 101.5
-#   idx 2  rebalance touch (price entered the 15m FVG during this bar)
-#   idx 3  lowest low 99.8
-#   idx 5  close 101.7 > 101.5 -> ChoCh
-#   idx 6  1m FVG [101.0, 101.6], mid 101.3
-#   idx 7  1m FVG [101.8, 102.2], mid 102.0; leg extends to 103.0
-SCENARIO = [
-    (101.0, 101.2, 100.8, 100.9),
-    (100.9, 101.5, 100.7, 100.8),
-    (100.8, 100.9, 100.0, 100.2),
-    (100.2, 100.5, 99.8, 100.4),
-    (100.4, 101.0, 100.3, 100.9),
-    (100.9, 101.8, 100.9, 101.7),
-    (101.7, 102.6, 101.6, 102.5),
-    (102.5, 103.0, 102.2, 102.4),
-]
-TOUCH, CHOCH = 2, 5
 
 
 def test_scenario_choch_index():

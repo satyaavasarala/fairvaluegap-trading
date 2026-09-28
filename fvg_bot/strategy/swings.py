@@ -45,6 +45,7 @@ def find_choch(
     """First index in [start, end] whose close breaks the most recent confirmed swing.
 
     Bullish breaks swing highs, bearish breaks swing lows. Close-based only.
+    A swing already broken before start is spent and cannot be broken again.
     """
     end = len(bars) - 1 if end is None else end
     bullish = direction is Direction.BULLISH
@@ -55,9 +56,11 @@ def find_choch(
             level = bars[k].high
         elif not bullish and is_swing_low(bars, k):
             level = bars[k].low
-        if i < start or level is None:
+        if level is None:
             continue
         close = bars[i].close
         if (bullish and close > level) or (not bullish and close < level):
-            return i
+            if i >= start:
+                return i
+            level = None
     return None
